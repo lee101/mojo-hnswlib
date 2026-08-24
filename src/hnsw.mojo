@@ -13,8 +13,20 @@ comptime IPtr = UnsafePointer[Int64, AnyOrigin[mut=True]]
 def vector_distance(a: FPtr, b: FPtr, dim: Int, space: Int) -> Float32:
     var acc0 = SIMD[DType.float32, W](0.0)
     var acc1 = SIMD[DType.float32, W](0.0)
+    var acc2 = SIMD[DType.float32, W](0.0)
+    var acc3 = SIMD[DType.float32, W](0.0)
     var i = 0
     if space == 0:
+        while i + 4 * W <= dim:
+            var delta0 = a.load[width=W](i) - b.load[width=W](i)
+            var delta1 = a.load[width=W](i + W) - b.load[width=W](i + W)
+            var delta2 = a.load[width=W](i + 2 * W) - b.load[width=W](i + 2 * W)
+            var delta3 = a.load[width=W](i + 3 * W) - b.load[width=W](i + 3 * W)
+            acc0 += delta0 * delta0
+            acc1 += delta1 * delta1
+            acc2 += delta2 * delta2
+            acc3 += delta3 * delta3
+            i += 4 * W
         while i + 2 * W <= dim:
             var delta0 = a.load[width=W](i) - b.load[width=W](i)
             var delta1 = a.load[width=W](i + W) - b.load[width=W](i + W)
@@ -25,13 +37,19 @@ def vector_distance(a: FPtr, b: FPtr, dim: Int, space: Int) -> Float32:
             var delta = a.load[width=W](i) - b.load[width=W](i)
             acc0 += delta * delta
             i += W
-        var total = (acc0 + acc1).reduce_add()
+        var total = (acc0 + acc1 + acc2 + acc3).reduce_add()
         while i < dim:
             var delta = a[i] - b[i]
             total += delta * delta
             i += 1
         return total
 
+    while i + 4 * W <= dim:
+        acc0 += a.load[width=W](i) * b.load[width=W](i)
+        acc1 += a.load[width=W](i + W) * b.load[width=W](i + W)
+        acc2 += a.load[width=W](i + 2 * W) * b.load[width=W](i + 2 * W)
+        acc3 += a.load[width=W](i + 3 * W) * b.load[width=W](i + 3 * W)
+        i += 4 * W
     while i + 2 * W <= dim:
         acc0 += a.load[width=W](i) * b.load[width=W](i)
         acc1 += a.load[width=W](i + W) * b.load[width=W](i + W)
@@ -39,7 +57,7 @@ def vector_distance(a: FPtr, b: FPtr, dim: Int, space: Int) -> Float32:
     while i + W <= dim:
         acc0 += a.load[width=W](i) * b.load[width=W](i)
         i += W
-    var total = (acc0 + acc1).reduce_add()
+    var total = (acc0 + acc1 + acc2 + acc3).reduce_add()
     while i < dim:
         total += a[i] * b[i]
         i += 1
@@ -335,6 +353,26 @@ def mh_search_layer_zero(
                 if best_count > ef:
                     best_pop(best_ids, best_distances, best_count)
                     best_count -= 1
+
+    for i in range(1, best_count):
+        var node = best_ids[i]
+        var distance = best_distances[i]
+        var j = i
+        while (
+            j > 0
+            and (
+                distance < best_distances[j - 1]
+                or (
+                    distance == best_distances[j - 1]
+                    and node < best_ids[j - 1]
+                )
+            )
+        ):
+            best_ids[j] = best_ids[j - 1]
+            best_distances[j] = best_distances[j - 1]
+            j -= 1
+        best_ids[j] = node
+        best_distances[j] = distance
     return best_count
 
 

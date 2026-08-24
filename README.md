@@ -82,19 +82,23 @@ three runs for queries and one complete measured graph build.
 
 | case | mojo-hnswlib | hnswlib 0.8 | upstream / Mojo | recall (Mojo / upstream) |
 | --- | ---: | ---: | ---: | ---: |
-| build 3,000 x 32 (`M=16`, `ef_construction=100`) | 7.21 s | 295.9 ms | 0.041x | n/a |
-| query 500 x k=10 (`ef=20`) | 199.4 ms | 14.7 ms | 0.073x | 0.924 / 0.879 |
-| query 500 x k=10 (`ef=100`) | 288.1 ms | 46.7 ms | 0.162x | 1.000 / 0.999 |
+| build 3,000 x 32 (`M=16`, `ef_construction=100`) | 1.84 s | 213.9 ms | 0.116x | n/a |
+| query 500 x k=10 (`ef=20`) | 35.4 ms | 8.0 ms | 0.225x | 0.924 / 0.879 |
+| query 500 x k=10 (`ef=100`) | 59.4 ms | 32.6 ms | 0.549x | 1.000 / 0.999 |
 
-Upstream remains faster, but level-zero best-first traversal now executes in one
-Mojo call instead of making a distance-kernel call for every graph expansion.
+Upstream remains faster, but level-zero best-first traversal executes in one
+Mojo call and leaves its candidates ordered in reusable scratch buffers.
 Pruning similarly fuses distance calculation, ordering, and diversity selection.
-The compact link matrix and all traversal workspaces are NumPy-owned and reused,
-which removes the dominant temporary allocations and FFI crossings while
-preserving the Python-owned graph representation.
+Stable NumPy buffer addresses are cached across calls, upper-layer distance
+scans reuse scratch storage, and the common query path reads results directly
+from those buffers. This removes the dominant temporary allocations, copies,
+validation passes, and FFI address conversions while preserving NumPy ownership.
 
-There is intentionally no GPU path. The kernels are CPU SIMD code, while graph
-construction and traversal involve irregular link reads and branches.
+There is intentionally no GPU path. L2 and dot-product distance have less than
+two arithmetic operations per byte moved, while graph construction and
+traversal add irregular link reads and branches. Bulk independent distance
+scans stay serial below 4,096 vectors and use eight CPU workers above that
+threshold; graph mutation and traversal remain single-threaded.
 
 Run the benchmark only through the task, which takes a machine-wide lock:
 
@@ -113,10 +117,11 @@ remain traversable but are excluded from results.
 `src/hnsw.mojo` is one compilation unit. Python calls it through `ctypes`;
 buffers cross the C ABI as integer addresses and are reconstructed as
 `UnsafePointer[..., AnyOrigin[mut=True]]` inside non-parametric
-`@export(...) ... abi("C")` functions. Mojo performs SIMD distance scans with a
-scalar remainder, complete level-zero heap traversal, and the dependent HNSW
-diversity-selection loop. NumPy owns inputs, outputs, reusable scratch buffers,
-and their lifetimes, so those buffers remain zero-copy across the FFI boundary.
+`@export(...) ... abi("C")` functions. Mojo performs distance scans with four
+independent SIMD accumulators and a scalar remainder, complete level-zero heap
+traversal, and the dependent HNSW diversity-selection loop. NumPy owns inputs,
+outputs, reusable scratch buffers, and their lifetimes, so those buffers remain
+zero-copy across the FFI boundary.
 
 ## License
 

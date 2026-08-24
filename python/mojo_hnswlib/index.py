@@ -9,11 +9,9 @@ from collections.abc import Callable, Iterable
 import numpy as np
 
 from ._lib import (
+    addr,
     distance_all,
-    distance_indexed,
-    pair_distance,
-    prune_neighbors,
-    search_layer_zero,
+    lib,
     select_neighbors,
 )
 
@@ -57,6 +55,15 @@ class Index:
         self._best_distances = np.empty(0, dtype=np.float32)
         self._visited = np.empty(0, dtype=np.int64)
         self._visit_token = 0
+        self._ffi = lib()
+        self._data_addr = 0
+        self._link0_addr = 0
+        self._link0_counts_addr = 0
+        self._candidate_ids_addr = 0
+        self._candidate_distances_addr = 0
+        self._best_ids_addr = 0
+        self._best_distances_addr = 0
+        self._visited_addr = 0
 
     @property
     def element_count(self) -> int:
@@ -97,6 +104,7 @@ class Index:
         self._rng = np.random.default_rng(self._random_seed)
         self._allow_replace_deleted = bool(allow_replace_deleted)
         self._data = np.empty((self.max_elements, self.dim), dtype=np.float32)
+        self._data_addr = addr(self._data)
         self._labels = np.empty(0, dtype=np.uint64)
         self._levels = np.empty(0, dtype=np.int16)
         self._links = []
@@ -141,6 +149,7 @@ class Index:
         resized = np.empty((int(new_size), self.dim), dtype=np.float32)
         resized[: self.element_count] = self._data[: self.element_count]
         self._data = resized
+        self._data_addr = addr(self._data)
         self.max_elements = int(new_size)
 
     def _require_initialized(self) -> None:
@@ -166,6 +175,13 @@ class Index:
         self._best_distances = np.empty(capacity, dtype=np.float32)
         self._visited = visited
         self._graph_capacity = capacity
+        self._link0_addr = addr(self._link0)
+        self._link0_counts_addr = addr(self._link0_counts)
+        self._candidate_ids_addr = addr(self._candidate_ids)
+        self._candidate_distances_addr = addr(self._candidate_distances)
+        self._best_ids_addr = addr(self._best_ids)
+        self._best_distances_addr = addr(self._best_distances)
+        self._visited_addr = addr(self._visited)
 
     def _sync_link0(self, position: int) -> None:
         neighbors = self._links[position][0]
@@ -194,26 +210,42 @@ class Index:
     def _random_level(self) -> int:
         return min(32, int(-np.log(max(float(self._rng.random()), 1e-12)) / np.log(self.M)))
 
-    def _distances(self, query: np.ndarray, positions: Iterable[int]) -> np.ndarray:
-        indices = np.ascontiguousarray(list(positions), dtype=np.int64)
-        result = np.empty(len(indices), dtype=np.float32)
-        if len(indices):
-            distance_indexed(self._data, query, indices, result, self._space_code)
-        return result
+    def _distances(self, query_addr: int, positions: Iterable[int]) -> np.ndarray:
+        count = 0
+        for count, position in enumerate(positions, start=1):
+            self._candidate_ids[count - 1] = position
+        if count:
+            self._ffi.mh_distance_indexed(
+                self._data_addr,
+                query_addr,
+                self._candidate_ids_addr,
+                self._candidate_distances_addr,
+                count,
+                self.dim,
+                self._space_code,
+            )
+        return self._candidate_distances[:count]
 
-    def _distance_one(self, query: np.ndarray, position: int) -> float:
-        return pair_distance(query, self._data[position], self._space_code)
+    def _distance_one(self, query_addr: int, position: int) -> float:
+        return float(
+            self._ffi.mh_pair_distance(
+                query_addr,
+                self._data_addr + position * self._data.strides[0],
+                self.dim,
+                self._space_code,
+            )
+        )
 
-    def _greedy(self, query: np.ndarray, entry: int, level: int) -> tuple[int, float]:
+    def _greedy(self, query_addr: int, entry: int, level: int) -> tuple[int, float]:
         current = entry
-        current_distance = self._distance_one(query, current)
+        current_distance = self._distance_one(query_addr, current)
         changed = True
         while changed:
             changed = False
             neighbors = self._links[current][level] if level < len(self._links[current]) else []
             if not neighbors:
                 break
-            distances = self._distances(query, neighbors)
+            distances = self._distances(query_addr, neighbors)
             best_offset = int(np.argmin(distances))
             best_distance = float(distances[best_offset])
             if best_distance < current_distance:
@@ -223,38 +255,13 @@ class Index:
         return current, current_distance
 
     def _search_layer(
-        self, query: np.ndarray, entries: Iterable[int], ef: int, level: int
+        self, query_addr: int, entries: Iterable[int], ef: int, level: int
     ) -> list[tuple[float, int]]:
         visited: set[int] = set()
         candidates: list[tuple[float, int]] = []
         best: list[tuple[float, int]] = []
         entry_list = list(entries)
-        if level == 0 and len(entry_list) == 1:
-            self._visit_token += 1
-            if self._visit_token == np.iinfo(np.int64).max:
-                self._visited.fill(0)
-                self._visit_token = 1
-            count = search_layer_zero(
-                self._data[: self.element_count],
-                query,
-                self._link0[: self.element_count],
-                self._link0_counts[: self.element_count],
-                self._candidate_ids[: self.element_count],
-                self._candidate_distances[: self.element_count],
-                self._best_ids[: self.element_count],
-                self._best_distances[: self.element_count],
-                self._visited[: self.element_count],
-                int(entry_list[0]),
-                self._visit_token,
-                ef,
-                self._space_code,
-                _trusted_graph=True,
-            )
-            return sorted(
-                (float(self._best_distances[i]), int(self._best_ids[i]))
-                for i in range(count)
-            )
-        entry_distances = self._distances(query, entry_list)
+        entry_distances = self._distances(query_addr, entry_list)
         for position, distance in zip(entry_list, entry_distances):
             pos = int(position)
             dist = float(distance)
@@ -278,7 +285,7 @@ class Index:
             if not unseen:
                 continue
             visited.update(unseen)
-            distances = self._distances(query, unseen)
+            distances = self._distances(query_addr, unseen)
             for neighbor, distance in zip(unseen, distances):
                 dist = float(distance)
                 if len(best) < ef or dist < -best[0][0]:
@@ -288,10 +295,35 @@ class Index:
                         heapq.heappop(best)
         return sorted((-negative_distance, position) for negative_distance, position in best)
 
+    def _search_layer_zero(self, query_addr: int, entry: int, ef: int) -> int:
+        self._visit_token += 1
+        if self._visit_token == np.iinfo(np.int64).max:
+            self._visited.fill(0)
+            self._visit_token = 1
+        return int(
+            self._ffi.mh_search_layer_zero(
+                self._data_addr,
+                query_addr,
+                self._link0_addr,
+                self._link0_counts_addr,
+                self._candidate_ids_addr,
+                self._candidate_distances_addr,
+                self._best_ids_addr,
+                self._best_distances_addr,
+                self._visited_addr,
+                entry,
+                self._visit_token,
+                ef,
+                2 * self.M,
+                self.dim,
+                self._space_code,
+            )
+        )
+
     def _select_neighbors(
         self, query: np.ndarray, candidates: list[tuple[float, int]], limit: int
     ) -> list[int]:
-        ordered = sorted(candidates)
+        ordered = candidates
         count = len(ordered)
         if not count:
             return []
@@ -308,21 +340,39 @@ class Index:
         )
         return self._best_ids[:selected_count].tolist()
 
+    def _select_level_zero(self, count: int, limit: int) -> list[int]:
+        selected_count = int(
+            self._ffi.mh_select_neighbors(
+                self._data_addr,
+                self._best_ids_addr,
+                self._best_distances_addr,
+                self._candidate_ids_addr,
+                count,
+                min(limit, count),
+                self.dim,
+                self._space_code,
+            )
+        )
+        return self._candidate_ids[:selected_count].tolist()
+
     def _prune(self, position: int, level: int, limit: int) -> None:
         neighbors = self._links[position][level]
         if len(neighbors) <= limit:
             return
         count = len(neighbors)
         self._candidate_ids[:count] = neighbors
-        selected_count = prune_neighbors(
-            self._data,
-            self._candidate_ids,
-            self._candidate_distances,
-            self._best_ids,
-            count,
-            limit,
-            position,
-            self._space_code,
+        selected_count = int(
+            self._ffi.mh_prune_neighbors(
+                self._data_addr,
+                self._candidate_ids_addr,
+                self._candidate_distances_addr,
+                self._best_ids_addr,
+                count,
+                limit,
+                position,
+                self.dim,
+                self._space_code,
+            )
         )
         selected = self._best_ids[:selected_count].tolist()
         selected_set = set(selected)
@@ -342,6 +392,7 @@ class Index:
         level = self._random_level()
         self._ensure_graph_capacity(position + 1)
         self._data[position] = vector
+        query_addr = self._data_addr + position * self._data.strides[0]
         self._labels = np.append(self._labels, np.uint64(label))
         self._levels = np.append(self._levels, np.int16(level))
         self._links.append([[] for _ in range(level + 1)])
@@ -354,12 +405,21 @@ class Index:
 
         entry = self._entrypoint
         for layer in range(self._max_level, level, -1):
-            entry, _ = self._greedy(vector, entry, layer)
+            entry, _ = self._greedy(query_addr, entry, layer)
 
         for layer in range(min(level, self._max_level), -1, -1):
-            candidates = self._search_layer(vector, [entry], self.ef_construction, layer)
             degree = 2 * self.M if layer == 0 else self.M
-            neighbors = self._select_neighbors(vector, candidates, degree)
+            if layer == 0:
+                candidate_count = self._search_layer_zero(
+                    query_addr, entry, self.ef_construction
+                )
+                entry = int(self._best_ids[0])
+                neighbors = self._select_level_zero(candidate_count, degree)
+            else:
+                candidates = self._search_layer(
+                    query_addr, [entry], self.ef_construction, layer
+                )
+                neighbors = self._select_neighbors(vector, candidates, degree)
             self._links[position][layer] = neighbors
             if layer == 0:
                 self._sync_link0(position)
@@ -373,7 +433,7 @@ class Index:
                         self._link0[neighbor, offset] = position
                         self._link0_counts[neighbor] = offset + 1
                 self._prune(neighbor, layer, degree)
-            if candidates:
+            if layer != 0 and candidates:
                 entry = candidates[0][1]
 
         if level > self._max_level:
@@ -471,19 +531,25 @@ class Index:
     def _query_one(
         self, query: np.ndarray, k: int, filter: Callable[[int], bool] | None
     ) -> tuple[np.ndarray, np.ndarray]:
+        query_addr = addr(query)
         entry = self._entrypoint
         for level in range(self._max_level, 0, -1):
-            entry, _ = self._greedy(query, entry, level)
+            entry, _ = self._greedy(query_addr, entry, level)
         ef = max(self.ef, k)
-        candidates = self._search_layer(query, [entry], ef, 0)
+        candidate_count = self._search_layer_zero(query_addr, entry, ef)
+        if filter is None and not self._deleted and candidate_count >= k:
+            positions = self._best_ids[:k]
+            return self._labels[positions], self._best_distances[:k].copy()
         eligible = [
-            (distance, position)
-            for distance, position in candidates
+            (float(self._best_distances[offset]), int(self._best_ids[offset]))
+            for offset in range(candidate_count)
+            for position in (int(self._best_ids[offset]),)
             if position not in self._deleted
             and (filter is None or bool(filter(int(self._labels[position]))))
         ]
 
-        if len(eligible) < k:
+        needs_sort = len(eligible) < k
+        if needs_sort:
             all_distances = np.empty(self.element_count, dtype=np.float32)
             distance_all(
                 self._data, query, all_distances, self.element_count, self._space_code
@@ -497,7 +563,8 @@ class Index:
                 and (filter is None or bool(filter(int(self._labels[position]))))
             ]
             eligible.extend(missing)
-        eligible.sort()
+        if needs_sort:
+            eligible.sort()
         chosen = eligible[:k]
         if len(chosen) < k:
             raise RuntimeError("Cannot return the results in a contiguous 2D array. Probably ef or M is too small")

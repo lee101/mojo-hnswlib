@@ -179,6 +179,43 @@ def test_search_ffi_rejects_invalid_graph_bounds():
         )
 
 
+def test_level_zero_search_returns_ordered_simd_tail_results():
+    data = np.asarray(
+        [[4.0, 0.0, 1.0], [1.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+        dtype=np.float32,
+    )
+    query = np.zeros(3, dtype=np.float32)
+    links = np.asarray(
+        [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]], dtype=np.int64
+    )
+    counts = np.full(4, 3, dtype=np.int64)
+    candidate_ids = np.empty(4, dtype=np.int64)
+    candidate_distances = np.empty(4, dtype=np.float32)
+    best_ids = np.empty(4, dtype=np.int64)
+    best_distances = np.empty(4, dtype=np.float32)
+    visited = np.zeros(4, dtype=np.int64)
+
+    count = search_layer_zero(
+        data,
+        query,
+        links,
+        counts,
+        candidate_ids,
+        candidate_distances,
+        best_ids,
+        best_distances,
+        visited,
+        0,
+        1,
+        4,
+        0,
+    )
+
+    assert count == 4
+    assert np.array_equal(best_ids, np.asarray([1, 3, 2, 0], dtype=np.int64))
+    assert np.allclose(best_distances, np.asarray([1.0, 4.0, 9.0, 17.0]))
+
+
 def test_cosine_stores_normalized_vectors(corpus, indexes):
     data, _, labels = corpus
     ours, theirs = indexes["cosine"]
