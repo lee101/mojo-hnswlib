@@ -1,6 +1,6 @@
 """SIMD distance kernels used by the Python HNSW graph implementation."""
 
-from std.algorithm import parallelize
+from std.algorithm import map
 from std.sys.info import simd_width_of as simdwidthof
 
 comptime W = simdwidthof[DType.float64]()
@@ -86,7 +86,7 @@ def mh_distance_indexed(
                 space,
             )
 
-    parallelize[work](PARALLEL_DISTANCE_WORKERS)
+    map[work](PARALLEL_DISTANCE_WORKERS)
 
 
 @export("mh_distance_all")
@@ -121,7 +121,7 @@ def mh_distance_all(
                 task_data + i * dim, task_query, dim, space
             )
 
-    parallelize[work](PARALLEL_DISTANCE_WORKERS)
+    map[work](PARALLEL_DISTANCE_WORKERS)
 
 
 @export("mh_pair_distance")
