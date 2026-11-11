@@ -1,6 +1,5 @@
 """SIMD distance kernels used by the Python HNSW graph implementation."""
 
-from std.algorithm import map
 from std.sys.info import simd_width_of as simdwidthof
 
 comptime W = simdwidthof[DType.float64]()
@@ -18,23 +17,23 @@ def vector_distance(a: FPtr, b: FPtr, dim: Int, space: Int) -> Float32:
     var i = 0
     if space == 0:
         while i + 4 * W <= dim:
-            var delta0 = a.load[width=W](i) - b.load[width=W](i)
-            var delta1 = a.load[width=W](i + W) - b.load[width=W](i + W)
-            var delta2 = a.load[width=W](i + 2 * W) - b.load[width=W](i + 2 * W)
-            var delta3 = a.load[width=W](i + 3 * W) - b.load[width=W](i + 3 * W)
+            var delta0 = a.unsafe_load[width=W](i) - b.unsafe_load[width=W](i)
+            var delta1 = a.unsafe_load[width=W](i + W) - b.unsafe_load[width=W](i + W)
+            var delta2 = a.unsafe_load[width=W](i + 2 * W) - b.unsafe_load[width=W](i + 2 * W)
+            var delta3 = a.unsafe_load[width=W](i + 3 * W) - b.unsafe_load[width=W](i + 3 * W)
             acc0 += delta0 * delta0
             acc1 += delta1 * delta1
             acc2 += delta2 * delta2
             acc3 += delta3 * delta3
             i += 4 * W
         while i + 2 * W <= dim:
-            var delta0 = a.load[width=W](i) - b.load[width=W](i)
-            var delta1 = a.load[width=W](i + W) - b.load[width=W](i + W)
+            var delta0 = a.unsafe_load[width=W](i) - b.unsafe_load[width=W](i)
+            var delta1 = a.unsafe_load[width=W](i + W) - b.unsafe_load[width=W](i + W)
             acc0 += delta0 * delta0
             acc1 += delta1 * delta1
             i += 2 * W
         while i + W <= dim:
-            var delta = a.load[width=W](i) - b.load[width=W](i)
+            var delta = a.unsafe_load[width=W](i) - b.unsafe_load[width=W](i)
             acc0 += delta * delta
             i += W
         var total = (acc0 + acc1 + acc2 + acc3).reduce_add()
@@ -45,17 +44,17 @@ def vector_distance(a: FPtr, b: FPtr, dim: Int, space: Int) -> Float32:
         return total
 
     while i + 4 * W <= dim:
-        acc0 += a.load[width=W](i) * b.load[width=W](i)
-        acc1 += a.load[width=W](i + W) * b.load[width=W](i + W)
-        acc2 += a.load[width=W](i + 2 * W) * b.load[width=W](i + 2 * W)
-        acc3 += a.load[width=W](i + 3 * W) * b.load[width=W](i + 3 * W)
+        acc0 += a.unsafe_load[width=W](i) * b.unsafe_load[width=W](i)
+        acc1 += a.unsafe_load[width=W](i + W) * b.unsafe_load[width=W](i + W)
+        acc2 += a.unsafe_load[width=W](i + 2 * W) * b.unsafe_load[width=W](i + 2 * W)
+        acc3 += a.unsafe_load[width=W](i + 3 * W) * b.unsafe_load[width=W](i + 3 * W)
         i += 4 * W
     while i + 2 * W <= dim:
-        acc0 += a.load[width=W](i) * b.load[width=W](i)
-        acc1 += a.load[width=W](i + W) * b.load[width=W](i + W)
+        acc0 += a.unsafe_load[width=W](i) * b.unsafe_load[width=W](i)
+        acc1 += a.unsafe_load[width=W](i + W) * b.unsafe_load[width=W](i + W)
         i += 2 * W
     while i + W <= dim:
-        acc0 += a.load[width=W](i) * b.load[width=W](i)
+        acc0 += a.unsafe_load[width=W](i) * b.unsafe_load[width=W](i)
         i += W
     var total = (acc0 + acc1 + acc2 + acc3).reduce_add()
     while i < dim:
@@ -85,26 +84,16 @@ def mh_distance_indexed(
             )
         return
 
-    @parameter
-    def work(task: Int):
-        var task_data = FPtr(unsafe_from_address=data_addr)
-        var task_query = FPtr(unsafe_from_address=query_addr)
-        var task_indices = IPtr(unsafe_from_address=indices_addr)
-        var task_result = FPtr(unsafe_from_address=result_addr)
-        var chunk = (
-            count + PARALLEL_DISTANCE_WORKERS - 1
-        ) // PARALLEL_DISTANCE_WORKERS
+    var chunk = (
+        count + PARALLEL_DISTANCE_WORKERS - 1
+    ) // PARALLEL_DISTANCE_WORKERS
+    for task in range(PARALLEL_DISTANCE_WORKERS):
         var start = task * chunk
         var end = min(start + chunk, count)
         for i in range(start, end):
-            task_result[i] = vector_distance(
-                task_data + Int(task_indices[i]) * dim,
-                task_query,
-                dim,
-                space,
+            result[i] = vector_distance(
+                data + Int(indices[i]) * dim, query, dim, space
             )
-
-    map[work](PARALLEL_DISTANCE_WORKERS)
 
 
 @export("mh_distance_all")
@@ -124,22 +113,14 @@ def mh_distance_all(
             result[i] = vector_distance(data + i * dim, query, dim, space)
         return
 
-    @parameter
-    def work(task: Int):
-        var task_data = FPtr(unsafe_from_address=data_addr)
-        var task_query = FPtr(unsafe_from_address=query_addr)
-        var task_result = FPtr(unsafe_from_address=result_addr)
-        var chunk = (
-            count + PARALLEL_DISTANCE_WORKERS - 1
-        ) // PARALLEL_DISTANCE_WORKERS
+    var chunk = (
+        count + PARALLEL_DISTANCE_WORKERS - 1
+    ) // PARALLEL_DISTANCE_WORKERS
+    for task in range(PARALLEL_DISTANCE_WORKERS):
         var start = task * chunk
         var end = min(start + chunk, count)
         for i in range(start, end):
-            task_result[i] = vector_distance(
-                task_data + i * dim, task_query, dim, space
-            )
-
-    map[work](PARALLEL_DISTANCE_WORKERS)
+            result[i] = vector_distance(data + i * dim, query, dim, space)
 
 
 @export("mh_pair_distance")
